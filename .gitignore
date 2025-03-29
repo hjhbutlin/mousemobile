@@ -14,7 +14,11 @@ bld/
 [Ll]og/
 [Ll]ogs/
 
+*.o
+run
+
 # Visual Studio files
+.vscode/
 .vs/
 *_i.c
 *_p.c
