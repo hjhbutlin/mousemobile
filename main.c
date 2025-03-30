@@ -23,7 +23,30 @@ const double BACKGROUND_COLOUR[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 #define CAR_WIDTH 40
 #define CAR_HEIGHT 100
 
-#define CAR_BASE_SPEED 5.0
+#define CAR_BASE_SPEED 15.0
+#define GRIP_COEFFICIENT 0.9
+#define DRIFT_COEFFICIENT 0.2
+#define DRIFT_ANGULAR_MOMENTUM 1.5
+#define RECOVERY_RATE 1.0
+#define RW_SLIPPAGE 4.0
+#define TRANSITION_SPEED 10
+const double RECIPROCAL_TRANSITION_SPEED = 5/TRANSITION_SPEED;
+int driftScale = 0; // 0-TRANSITION_SPEED, determines how in a drift the car is for smoothness
+
+double sigmoidInterpolation(int* x) {
+    if (*x <= 0) {
+        *x = 0;
+        return 0.0;
+    }
+
+    if (*x >= TRANSITION_SPEED) {
+        *x = TRANSITION_SPEED;
+        return 1.0;
+    }
+
+    return 1 / (1 + exp(5 - RECIPROCAL_TRANSITION_SPEED * *x));
+}
+
 
 #define CAR_ACCEL 0
 
@@ -42,7 +65,7 @@ double cameraY = 0.0;
 double cameraSpeed = 0.0; // Track camera speed to handle deceleration
 
 // window input
-int mouseDown = 0;
+bool mouseDown = false;
 
 // ==========================================================
 
@@ -273,18 +296,45 @@ void display() {
     glutSwapBuffers();
 }
 
+
 void update(int n) {
     (void)n;
-
+    
+    // Acceleration
     you.speed += CAR_ACCEL; // steady acceleration
     
+    // Variables to track slip angles and forces
+    static double slipAngle = 0.0;        // Angle between car heading and actual travel direction
+    static double lateralVelocity = 0.0;  // Sideways component of velocity
+    
+    // Steering and drift calculations
+    double wheelbase = 1.35 * CAR_HEIGHT; // length of wheelbase
+    double turnRadius, angularVelocity;
+    
+    // Actual travel direction (can differ from car angle during drift)
+    double travelDirection = you.angle;
+    
+    // Get smooth interpolation value for drift transition
+    double howMuchToDrift = sigmoidInterpolation(&driftScale);
+    
+    if (mouseDown) {
+        driftScale++;
+    } else {
+        driftScale--;
+    }
+    
+    double gripFactor = GRIP_COEFFICIENT * (1.0 - howMuchToDrift) + 
+                        DRIFT_COEFFICIENT * howMuchToDrift;
+    
+    // Ackermann geometry for turning circle
     if (fabs(you.wheelAngle) > 0.001) {
-        double wheelbase = 1.35 * CAR_HEIGHT; // length of wheelbase
+        turnRadius = wheelbase / tan(fabs(you.wheelAngle));
         
-        // Ackermann steering geometry approximation
-        double turnRadius = wheelbase / tan(fabs(you.wheelAngle));
+        double normalAngVel = you.speed / turnRadius;
+        double driftAngVel = normalAngVel * DRIFT_ANGULAR_MOMENTUM;
         
-        double angularVelocity = you.speed / turnRadius;
+        angularVelocity = normalAngVel * (1.0 - howMuchToDrift) + 
+                          driftAngVel * howMuchToDrift;
         
         if (you.wheelAngle < 0) {
             angularVelocity = -angularVelocity;
@@ -292,10 +342,34 @@ void update(int n) {
         
         you.angle += angularVelocity;
     }
-
-    you.x += you.speed * sin(you.angle);
-    you.y += you.speed * cos(you.angle);
     
+    double lateralForce = 0.02 * you.speed * sin(you.wheelAngle) * howMuchToDrift;
+    lateralVelocity += lateralForce;
+    
+    double maxLateralVelocity = you.speed * (0.2 + (0.4 * howMuchToDrift));
+    if (lateralVelocity > maxLateralVelocity) lateralVelocity = maxLateralVelocity;
+    if (lateralVelocity < -maxLateralVelocity) lateralVelocity = -maxLateralVelocity;
+    
+    double effectiveRecoveryRate = RECOVERY_RATE * (1.0 - howMuchToDrift);
+    lateralVelocity *= (1.0 - effectiveRecoveryRate);
+    
+    slipAngle = atan2(lateralVelocity, you.speed);
+    
+    double normalSlipFactor = 0.8;
+    double driftSlipFactor = RW_SLIPPAGE;
+    double slipFactor = normalSlipFactor * (1.0 - howMuchToDrift) + 
+                        driftSlipFactor * howMuchToDrift;
+    
+    travelDirection = you.angle - slipAngle * slipFactor;
+    
+    you.x += you.speed * sin(travelDirection) + lateralVelocity * sin(travelDirection + M_PI/2);
+    you.y += you.speed * cos(travelDirection) + lateralVelocity * cos(travelDirection + M_PI/2);
+    
+    if (you.speed > CAR_BASE_SPEED) {
+        you.speed = CAR_BASE_SPEED;
+    }
+    
+    // Schedule next update
     glutPostRedisplay();
     glutTimerFunc(RENDER_MPF, update, 0);
 }
@@ -317,9 +391,9 @@ void mouseMove(int x, int y) {
 void mousePress(int button, int mouseState, int x, int y) {
     if (button == GLUT_LEFT_BUTTON) {
         if (mouseState == GLUT_DOWN) {
-            mouseDown = 1;
+            mouseDown = true;
         } else if (mouseState == GLUT_UP) {   
-            mouseDown = 0;
+            mouseDown = false;
         }
     }
 }
