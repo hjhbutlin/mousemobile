@@ -14,26 +14,35 @@
 #define WINDOW_WIDTH 800
 #define WINDOW_HEIGHT 800
 
-const double BACKGROUND_COLOUR[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+const double BACKGROUND_COLOUR[4] = {0.4f, 1.0f, 0.4f, 1.0f};
 
-#define RENDER_MPF 5 // milliseconds per frame; 20 => 50fps
+#define RENDER_MPF 5 // milliseconds per frame; 20 => 50fps; 5 => 200fps
 
 #define WHEEL_WIDTH 10
 #define WHEEL_HEIGHT 16
 #define CAR_WIDTH 40
 #define CAR_HEIGHT 100
 
-#define CAR_BASE_SPEED 15.0
-#define GRIP_COEFFICIENT 0.9
-#define DRIFT_COEFFICIENT 0.2
+#define CAR_BASE_SPEED 30.0
+#define CAR_ACCEL 0
+
 #define DRIFT_ANGULAR_MOMENTUM 1.5
-#define RECOVERY_RATE 1.0
+#define RECOVERY_RATE 0.1
 #define RW_SLIPPAGE 4.0
 #define TRANSITION_SPEED 10
+#define MAX_BASE_TV 2.0
+#define MAX_WHEEL_ANGLE 0.5
+#define TIRE_TRACK_SIZE 10
+#define TIRE_TRACK_LIFETIME 1000
+
+#define CAMERA_SMOOTHNESS 0.05 // smaller is more smooth, range 0-1
+#define CAMERA_LEAD 500.0
+#define VIEW_SCALE 0.3
+
 const double RECIPROCAL_TRANSITION_SPEED = 5/TRANSITION_SPEED;
 int driftScale = 0; // 0-TRANSITION_SPEED, determines how in a drift the car is for smoothness
 
-double sigmoidInterpolation(int* x) {
+double linearInterpolation(int* x) {
     if (*x <= 0) {
         *x = 0;
         return 0.0;
@@ -44,14 +53,19 @@ double sigmoidInterpolation(int* x) {
         return 1.0;
     }
 
-    return 1 / (1 + exp(5 - RECIPROCAL_TRANSITION_SPEED * *x));
+    return 0.05 * *x;
 }
 
+// camera position
+double cameraX = 0.0;
+double cameraY = 0.0;
 
-#define CAR_ACCEL 0
+// lerp for the camera
+void lerp(double targetX, double targetY) {
+    cameraX += (targetX - cameraX) * CAMERA_SMOOTHNESS;
+    cameraY += (targetY - cameraY) * CAMERA_SMOOTHNESS;
+}
 
-// Camera settings
-#define CAMERA_SMOOTHNESS 1.0f  // Lower = smoother (range 0.01-1.0)
 
 typedef struct {
     double x, y, speed, wheelAngle, angle; // centre (x,y), speed scalar, wheel angle, angle
@@ -59,11 +73,14 @@ typedef struct {
 
 Car you = {0.0, 0.0, CAR_BASE_SPEED, 0.0, 0.0};
 
-// Camera position
-double cameraX = 0.0;
-double cameraY = 0.0;
-double cameraSpeed = 0.0; // Track camera speed to handle deceleration
 
+typedef struct {
+    double LW_x, LW_y, RW_x, RW_y; // left wheel x,y right wheel x,y
+    bool active;
+} tireTrackElement;
+
+tireTrackElement tireTracks[TIRE_TRACK_LIFETIME]; // stores the last n frames of tire tracks (c. 5s).
+int trackIndex = 0;
 // window input
 bool mouseDown = false;
 
@@ -96,6 +113,29 @@ double distance(double x1, double y1, double x2, double y2) {
     return sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
 }
 
+void addTireTrack() {
+    if (mouseDown) {
+        double LW_x, LW_y, RW_x, RW_y;
+        
+    
+        double leftWheelLocalX = -CAR_WIDTH;
+        double leftWheelLocalY = -0.75 * CAR_HEIGHT;
+        double rightWheelLocalX = CAR_WIDTH;
+        double rightWheelLocalY = -0.75 * CAR_HEIGHT;
+        
+        double sinAngle = sin(you.angle);
+        double cosAngle = cos(you.angle);
+        
+        LW_x = you.x - (leftWheelLocalX * cosAngle - leftWheelLocalY * sinAngle);
+        LW_y = you.y + (leftWheelLocalX * sinAngle + leftWheelLocalY * cosAngle);
+        
+        RW_x = you.x - (rightWheelLocalX * cosAngle - rightWheelLocalY * sinAngle);
+        RW_y = you.y + (rightWheelLocalX * sinAngle + rightWheelLocalY * cosAngle);
+        
+        tireTracks[trackIndex] = (tireTrackElement){LW_x, LW_y, RW_x, RW_y, true};
+    }
+}
+
 void drawCar() {
     glColor3f(0.0,0.0,0.0);
     
@@ -118,7 +158,9 @@ void drawCar() {
 
     // draw the car body
     glBegin(GL_QUADS);
-    
+
+    glColor3f(0.0,0.0,0.0);
+
     // GRAY BIT
     glColor3f(0.4,0.4,0.4);
 
@@ -253,6 +295,25 @@ void drawGrid() {
     }
     
     glEnd();
+
+    glBegin(GL_QUADS);
+    glColor3f(0.0,0.0,0.0);
+    for (int i = 0; i < TIRE_TRACK_LIFETIME; i++) {
+        if (tireTracks[i].active) {
+            glVertex2f(tireTracks[i].LW_x - TIRE_TRACK_SIZE, tireTracks[i].LW_y - TIRE_TRACK_SIZE);
+            glVertex2f(tireTracks[i].LW_x + TIRE_TRACK_SIZE, tireTracks[i].LW_y - TIRE_TRACK_SIZE);
+            glVertex2f(tireTracks[i].LW_x + TIRE_TRACK_SIZE, tireTracks[i].LW_y + TIRE_TRACK_SIZE);
+            glVertex2f(tireTracks[i].LW_x - TIRE_TRACK_SIZE, tireTracks[i].LW_y + TIRE_TRACK_SIZE);
+
+            glVertex2f(tireTracks[i].RW_x - TIRE_TRACK_SIZE, tireTracks[i].RW_y - TIRE_TRACK_SIZE);
+            glVertex2f(tireTracks[i].RW_x + TIRE_TRACK_SIZE, tireTracks[i].RW_y - TIRE_TRACK_SIZE);
+            glVertex2f(tireTracks[i].RW_x + TIRE_TRACK_SIZE, tireTracks[i].RW_y + TIRE_TRACK_SIZE);
+            glVertex2f(tireTracks[i].RW_x - TIRE_TRACK_SIZE, tireTracks[i].RW_y + TIRE_TRACK_SIZE);
+        }
+    }
+    
+
+    glEnd();
 }
 
 // ===========================================================
@@ -282,15 +343,16 @@ void display() {
     
     // Set up the camera view
     glLoadIdentity();
-    glScalef(0.5,0.5,0.5);
+    glScalef(VIEW_SCALE,VIEW_SCALE,VIEW_SCALE);
 
-    // glTranslatef(-you.x, -you.y, 0.0f);
+    glTranslatef(-cameraX,-cameraY,0.0);
     
     // Draw the grid to give a sense of movement
     drawGrid();
-    
+
     // Draw the car
     drawCar();
+
 
     glFlush();
     glutSwapBuffers();
@@ -298,24 +360,21 @@ void display() {
 
 
 void update(int n) {
-    (void)n;
+    n++;
+
     
-    // Acceleration
-    you.speed += CAR_ACCEL; // steady acceleration
+    you.speed += CAR_ACCEL;
     
-    // Variables to track slip angles and forces
-    static double slipAngle = 0.0;        // Angle between car heading and actual travel direction
-    static double lateralVelocity = 0.0;  // Sideways component of velocity
+    static double slipAngle = 0.0;
+    static double tangentialV = 0.0;
     
-    // Steering and drift calculations
     double wheelbase = 1.35 * CAR_HEIGHT; // length of wheelbase
     double turnRadius, angularVelocity;
     
-    // Actual travel direction (can differ from car angle during drift)
+    // actual travel direction
     double travelDirection = you.angle;
     
-    // Get smooth interpolation value for drift transition
-    double howMuchToDrift = sigmoidInterpolation(&driftScale);
+    double howMuchToDrift = linearInterpolation(&driftScale);
     
     if (mouseDown) {
         driftScale++;
@@ -323,8 +382,6 @@ void update(int n) {
         driftScale--;
     }
     
-    double gripFactor = GRIP_COEFFICIENT * (1.0 - howMuchToDrift) + 
-                        DRIFT_COEFFICIENT * howMuchToDrift;
     
     // Ackermann geometry for turning circle
     if (fabs(you.wheelAngle) > 0.001) {
@@ -343,33 +400,28 @@ void update(int n) {
         you.angle += angularVelocity;
     }
     
-    double lateralForce = 0.02 * you.speed * sin(you.wheelAngle) * howMuchToDrift;
-    lateralVelocity += lateralForce;
-    
-    double maxLateralVelocity = you.speed * (0.2 + (0.4 * howMuchToDrift));
-    if (lateralVelocity > maxLateralVelocity) lateralVelocity = maxLateralVelocity;
-    if (lateralVelocity < -maxLateralVelocity) lateralVelocity = -maxLateralVelocity;
-    
-    double effectiveRecoveryRate = RECOVERY_RATE * (1.0 - howMuchToDrift);
-    lateralVelocity *= (1.0 - effectiveRecoveryRate);
-    
-    slipAngle = atan2(lateralVelocity, you.speed);
+    double lateralForce = 0.02 * you.speed * sin(you.wheelAngle) * (howMuchToDrift * 2 - 1);
+    tangentialV = fmax(fmin(fabs(tangentialV + lateralForce), MAX_BASE_TV),0); // clamps between 0 and 1
+
+    slipAngle = atan2(tangentialV, you.speed);
     
     double normalSlipFactor = 0.8;
-    double driftSlipFactor = RW_SLIPPAGE;
-    double slipFactor = normalSlipFactor * (1.0 - howMuchToDrift) + 
-                        driftSlipFactor * howMuchToDrift;
+    double slipFactor = normalSlipFactor * (1.0 - howMuchToDrift) + RW_SLIPPAGE * howMuchToDrift;
     
     travelDirection = you.angle - slipAngle * slipFactor;
     
-    you.x += you.speed * sin(travelDirection) + lateralVelocity * sin(travelDirection + M_PI/2);
-    you.y += you.speed * cos(travelDirection) + lateralVelocity * cos(travelDirection + M_PI/2);
+    you.x += you.speed * sin(travelDirection) + tangentialV * sin(travelDirection + M_PI/2);
+    you.y += you.speed * cos(travelDirection) + tangentialV * cos(travelDirection + M_PI/2);
     
-    if (you.speed > CAR_BASE_SPEED) {
-        you.speed = CAR_BASE_SPEED;
-    }
+
+    lerp(you.x + CAMERA_LEAD * sin(travelDirection),you.y + CAMERA_LEAD * cos(travelDirection));
     
-    // Schedule next update
+    addTireTrack();
+    trackIndex = (trackIndex + 1) % TIRE_TRACK_LIFETIME;
+
+    tireTracks[trackIndex].active = false;
+
+
     glutPostRedisplay();
     glutTimerFunc(RENDER_MPF, update, 0);
 }
@@ -385,13 +437,17 @@ void update(int n) {
 
 void mouseMove(int x, int y) {
     (void)y;
-    you.wheelAngle = ((float)x/WINDOW_WIDTH - 0.5);
+
+    you.wheelAngle = fmax(fmin( ((float)x/WINDOW_WIDTH - 0.5),MAX_WHEEL_ANGLE),-MAX_WHEEL_ANGLE);
 }
 
 void mousePress(int button, int mouseState, int x, int y) {
+    (void)x; (void)y;
+
     if (button == GLUT_LEFT_BUTTON) {
         if (mouseState == GLUT_DOWN) {
             mouseDown = true;
+
         } else if (mouseState == GLUT_UP) {   
             mouseDown = false;
         }
